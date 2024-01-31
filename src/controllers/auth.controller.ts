@@ -15,6 +15,7 @@ import {
   ERROR_INVALID_CREDENTIALS,
   ERROR_INVALID_INPUT,
   RESULT_OK,
+  SALT_PASS_SEPARATOR,
 } from "../utils/constants";
 import { getUserBy } from "../utils/db";
 
@@ -39,20 +40,18 @@ export const authController = new Elysia({ prefix: "/auth" })
     }),
   })
   .post("/logout", ({ request: { headers } }) => authLogout(headers))
-  .post("/authForgotPassword", ({ body }) => authForgotPassword(body), {
+  .post("/forgotPassword", ({ body }) => authForgotPassword(body), {
     body: t.Object({
-      email: t.String(),
+      inputEmail: t.String(),
     }),
   })
-  .post("/authResetPassword", ({ body }) => authSignup(body), {
+  .post("/resetPassword", ({ body }) => authResetPassword(body), {
     body: t.Object({
-      firstName: t.String(),
-      lastName: t.String(),
-      email: t.String(),
-      password: t.String(),
+      code: t.String(),
+      newpass: t.String(),
     }),
   })
-  .post("/authRefresh", ({ body }) => authRefresh(body), {
+  .post("/refreshToken", ({ body }) => authRefresh(body), {
     body: t.Object({
       refreshToken: t.String(),
     }),
@@ -108,7 +107,7 @@ const authSignup = async (body: {
   }
   const salt = uuidv4(false);
   const hashedPassword = hashPassword(password, salt);
-  const savedPassword = `${salt}${"SALT_PASS_SEPARATOR"}${hashedPassword}`;
+  const savedPassword = `${salt}${SALT_PASS_SEPARATOR}${hashedPassword}`;
 
   const verifyCode = uuidv4(false);
 
@@ -242,6 +241,52 @@ const authRefresh = async ({ refreshToken }: { refreshToken: string }) => {
   return { userJwt, userRefreshToken };
 };
 
-const authForgotPassword = ({ email }: { email: string }) => {};
+const authForgotPassword = ({ inputEmail }: { inputEmail: string }) => {
+  const userEmail = inputEmail.toLowerCase();
 
-const authResetPassword = () => {};
+  // save unique code into user verify_code column
+  const newCode = uuidv4(false);
+  const sql = `UPDATE tbl_user SET verify_code = $1, status = '${UserStatus.Pending}' WHERE email = $2 RETURNING uid`;
+  const db = getDB();
+  const query = db.query(sql);
+  const result = query.get(newCode, userEmail);
+  if (!result) return ERROR_DB_UPDATE;
+
+  // finally send email
+  /* await sendEmail(
+    userEmail,
+    "password reset",
+    `call authResetPassword API with this code to reset your password ${newCode}`
+  ); */
+
+  return { result: "success", message: "Email sent", code: newCode };
+};
+
+const authResetPassword = async ({
+  code,
+  newpass,
+}: {
+  code: string;
+  newpass: string;
+}) => {
+  const db = getDB();
+
+  // check code in database
+  const userInfo = await getUserBy(db, "verify_code", code);
+  if (!userInfo) return ERROR_INVALID_INPUT;
+  const { status, uid } = userInfo;
+  if (status !== UserStatus.Pending) return ERROR_INVALID_INPUT;
+
+  // Create new hashed password
+  const salt = uuidv4(false);
+  const hashedPassword = hashPassword(newpass, salt);
+  const savedPassword = `${salt}${SALT_PASS_SEPARATOR}${hashedPassword}`;
+
+  // save new password and clear verification code
+  const sql = `UPDATE tbl_user SET pass = $1, verify_code = null WHERE uid = $2 RETURNING uid`;
+  const query = db.query(sql);
+  const result = query.get(savedPassword, uid);
+  if (!result) return ERROR_DB_UPDATE;
+
+  return RESULT_OK;
+};
